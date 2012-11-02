@@ -4,8 +4,8 @@ Beanstalkd MySQL UDF plugin
 Based on [Gearman UDF](https://launchpad.net/gearman-mysql-udf) plugin.
 
 ## TODO
-- memory leak test
-- beanstalk disconnect test
+- ~~memory leak test~~
+- ~~beanstalk disconnect test~~
 - heavy usage test
 - trigger test
 

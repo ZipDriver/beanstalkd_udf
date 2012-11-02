@@ -18,6 +18,7 @@ struct beanstalkd_server
   char *host;
   char *tube;
   int socket;
+  int failed;
   beanstalkd_server_st *next;
   beanstalkd_server_st *prev;
 };
@@ -37,6 +38,8 @@ void udf_debug( char *msg, ... ) {
 #endif
 }
 
+void _release_server(beanstalkd_server_st *server);
+beanstalkd_server_st* _delete_server(beanstalkd_server_st *server);
 my_bool _do_init(UDF_INIT *initid, UDF_ARGS *args, char *message);
 void _do_deinit(UDF_INIT *initid);
 bool _find_server(beanstalkd_server_st **client, UDF_ARGS *args);
@@ -47,6 +50,41 @@ char *beanstalkd_set_server(UDF_INIT *initid, UDF_ARGS *args, char *result, unsi
 my_bool beanstalkd_do_init(UDF_INIT *initid, UDF_ARGS *args, char *message);
 char *beanstalkd_do(UDF_INIT *initid, UDF_ARGS *args, char *result, unsigned long *length, char *is_null, char *error);
 void beanstalkd_do_deinit(UDF_INIT *initid);
+
+void _release_server(beanstalkd_server_st *server)
+{
+  if (server->host)
+  {
+    free(server->host);
+  }
+  if (server->tube)
+  {
+    free(server->tube);
+  }
+  free(server);
+}
+
+beanstalkd_server_st* _delete_server(beanstalkd_server_st *server)
+{
+  beanstalkd_server_st *tmp;
+
+  if (server->prev != NULL)
+  {
+    server->prev->next = server->next;
+  } 
+  if (server->next != NULL)
+  {
+    server->next->prev = server->prev;
+  }
+
+  if (server == _server_list)
+  {
+    _server_list = server->next;
+  }
+  tmp = server->next;
+  _release_server(server);
+  return tmp;
+}
 
 my_bool _do_init(UDF_INIT *initid, UDF_ARGS *args, char *message)
 {
@@ -72,14 +110,7 @@ my_bool _do_init(UDF_INIT *initid, UDF_ARGS *args, char *message)
   {
       args->arg_type[2] = STRING_RESULT;
   }
-/*
-  initid->ptr = calloc(1, sizeof(beanstalkd_server_st));
-  if (initid->ptr == NULL)
-  { 
-    snprintf(message, MYSQL_ERRMSG_SIZE, "calloc() failed: %d", errno);
-    return 1;
-  }
-*/  
+
 /*
   initid->maybe_null= 1;
   initid->max_length= GEARMAN_UDF_RESULT_SIZE;
@@ -90,14 +121,6 @@ my_bool _do_init(UDF_INIT *initid, UDF_ARGS *args, char *message)
 
 void _do_deinit(UDF_INIT *initid)
 {
-  beanstalkd_server_st *client= (beanstalkd_server_st *)(initid->ptr);
-
-  if (client == NULL)
-  {
-    return;
-  }
-
-  free(client);
 }
 
 bool _find_server(beanstalkd_server_st **client, UDF_ARGS *args)
@@ -110,13 +133,17 @@ bool _find_server(beanstalkd_server_st **client, UDF_ARGS *args)
   #ifdef DEBUG
   for (server = _server_list; server != NULL; server = server->next)
   {
-    udf_debug("server: s:%p h:%p t:%p s:%d n:%p p:%p\n", server, server->host, server->tube, server->socket, server->next, server->prev);
+    udf_debug("server: s:%p h:%p t:%p s:%d f:%d n:%p p:%p\n", server, server->host, server->tube, server->socket, server->failed, server->next, server->prev);
   }
   #endif
 
   bool found = false;
   for (server = _server_list; server != NULL; server = server->next)
   {
+    if (server->failed)
+    {
+      continue;
+    }
     // job, tube
     if (args->arg_count == 2)
     {
@@ -200,25 +227,38 @@ char *beanstalkd_set_server(UDF_INIT *initid, UDF_ARGS *args, char *result, unsi
 
   pthread_mutex_lock(&_server_lock);
 
-  bool found = false;
+  #ifdef DEBUG
+  for (server = _server_list; server != NULL; server = server->next)
+  {
+    udf_debug("server: s:%p h:%p t:%p s:%d f:%d n:%p p:%p\n", server, server->host, server->tube, server->socket, server->failed, server->next, server->prev);
+  }
+  #endif
+
+  // XXX: remove failed server from list, only when context locked
+  server = _server_list;
+  while (server != NULL)
+  {    
+    if (server->failed)
+    {
+      server = _delete_server(server);
+    } else {
+      server = server->next;
+    }
+  }
+
   for (server = _server_list; server != NULL; server = server->next)
   {
     if (args->arg_count == 1 && server->tube == NULL && strcmp(args->args[0], server->host) == 0)
     {
-      found = true;
       break;
     }
     if (args->arg_count == 2 && server->tube != NULL && strcmp(args->args[0], server->host) == 0 && strcmp(args->args[1], server->tube) == 0)
     {
-      found = true;
       break;
     }
   }
 
-  if (found == false)
-  {
-    server = NULL;
-  }
+  udf_debug("server = %p\n", server);
 
   if (server == NULL)
   {
@@ -234,11 +274,12 @@ char *beanstalkd_set_server(UDF_INIT *initid, UDF_ARGS *args, char *result, unsi
     server->socket = 0;
     server->next = NULL;
     server->prev = NULL;
+    server->failed = 0;
 
     server->host = malloc(args->lengths[0]);
     if (server->host == NULL)
     {
-      free(server);
+      _release_server(server);
 
       snprintf(result, 255, "malloc() failed: %d", errno);
       *length = strlen(result);
@@ -252,8 +293,7 @@ char *beanstalkd_set_server(UDF_INIT *initid, UDF_ARGS *args, char *result, unsi
       server->tube = malloc(args->lengths[1]);
       if (server->tube == NULL)
       {
-        free(server->host);
-        free(server);
+        _release_server(server);
 
         snprintf(result, 255, "malloc() failed: %d", errno);
         *length = strlen(result);
@@ -266,12 +306,7 @@ char *beanstalkd_set_server(UDF_INIT *initid, UDF_ARGS *args, char *result, unsi
     server->socket = bs_connect(server->host, 11300);
     if (server->socket == BS_STATUS_FAIL)
     {
-      free(server->host);
-      if (server->tube != NULL)
-      {
-        free(server->tube);
-      }
-      free(server);
+      _release_server(server);
 
       strncpy(result, "bs_connect() failed.", 255);
       result[254] = 0;
@@ -284,9 +319,7 @@ char *beanstalkd_set_server(UDF_INIT *initid, UDF_ARGS *args, char *result, unsi
     {
       if(bs_use(server->socket, server->tube) != BS_STATUS_OK)
       {
-        free(server->host);
-        free(server->tube);
-        free(server);
+        _release_server(server);
 
         snprintf(result, 255, "bs_use() failed");
         *length = strlen(result);
@@ -295,9 +328,7 @@ char *beanstalkd_set_server(UDF_INIT *initid, UDF_ARGS *args, char *result, unsi
       }
       if (bs_watch(server->socket, server->tube) != BS_STATUS_OK)
       {
-        free(server->host);
-        free(server->tube);
-        free(server);
+        _release_server(server);
 
         snprintf(result, 255, "bs_watch() failed");
         *length = strlen(result);
@@ -306,9 +337,7 @@ char *beanstalkd_set_server(UDF_INIT *initid, UDF_ARGS *args, char *result, unsi
       }
       if (bs_ignore(server->socket, "default") != BS_STATUS_OK)
       {
-        free(server->host);
-        free(server->tube);
-        free(server);
+        _release_server(server);
 
         snprintf(result, 255, "bs_ignore() failed");
         *length = strlen(result);
@@ -344,16 +373,22 @@ void beanstalkd_do_deinit(UDF_INIT *initid)
 char *beanstalkd_do(UDF_INIT *initid, UDF_ARGS *args, char *result, unsigned long *length, char *is_null, char *error)
 {
   beanstalkd_server_st *client = (beanstalkd_server_st *)(initid->ptr);
-  udf_debug("client: %p\n", client);
   char buffer[32];
 
   if (_find_server(&client, args) == false)
   {
-    *error= 1;
+    *error = 1;
     return NULL;
   }  
 
-  udf_debug("client: %p\n", client);
+  char *yaml;
+  if (bs_list_tubes(client->socket, &yaml) != BS_STATUS_OK)
+  {
+    client->failed = 1;
+    *error = 2;
+    return NULL;
+  }
+  free(yaml);
 
   int id = bs_put(client->socket, 0, 0, 3600, args->args[0], args->lengths[0]);
   if (id < 1)
