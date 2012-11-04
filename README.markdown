@@ -3,6 +3,8 @@ Beanstalkd MySQL UDF plugin
 
 Based on [Gearman UDF](https://launchpad.net/gearman-mysql-udf) plugin.
 
+A simple test application included for testing MySQL UDF plugin without MySQL usage.
+
 ## TODO
 - ~~memory leak test~~
 - ~~beanstalk disconnect test~~
