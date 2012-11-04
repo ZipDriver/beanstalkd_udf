@@ -3,8 +3,11 @@ CC           = gcc
 
 all: beanstalkd_udf.so
 
+test: beanstalkd_udf.so
+	$(CC) $(CFLAGS) -rdynamic -o test test.c -lbeanstalk -L.
+
 beanstalkd_udf.so:
-	$(CC) $(CFLAGS) -Wall -fPIC -shared -o beanstalkd_udf.so beanstalkd_udf.c -lbeanstalk -L.
+	$(CC) $(CFLAGS) -fPIC -shared -o beanstalkd_udf.so beanstalkd_udf.c -lbeanstalk -L.
 
 clean:
-	rm -f beanstalkd_udf.so
+	rm -f beanstalkd_udf.so test.o
