@@ -15,16 +15,20 @@ typedef void (*func_deinit)(UDF_INIT *);
 
 typedef void (*func_serverlist)();
 typedef void (*func_serverclean)();
+typedef void (*func_serverrelease)();
 
-bool call_udf(char *name, UDF_ARGS *args, int ret);
-bool call_udf_command(char *name, UDF_INIT *init, UDF_ARGS *args, int ret);
+int call_udf(char *name, UDF_ARGS *args, int ret);
+int call_udf_command(char *name, UDF_INIT *init, UDF_ARGS *args, int ret);
 
 void free_args(UDF_ARGS *args)
 {
   int i;
   for (i=0; i<args->arg_count; i++) 
   {
-    free(args->args[i]);
+    if (args->args[i] != NULL)
+    {
+      free(args->args[i]);
+    }
   }
   free(args->args);
   
@@ -45,25 +49,31 @@ UDF_ARGS *alloc_args(int count)
 
   args->arg_count = count;
   args->arg_type = malloc(args->arg_count * sizeof(int));
-  args->args = malloc(args->arg_count * sizeof(char));
+  args->args = malloc(args->arg_count * sizeof(char*));
   args->maybe_null = malloc(args->arg_count * sizeof(char));
   args->lengths = malloc(args->arg_count * sizeof(unsigned long));
+
+  int i;
+  for (i=0; i<args->arg_count; i++) 
+  {
+    args->args[i] = NULL;
+  }
 
   return args;
 }
 
-bool set_args_string(UDF_ARGS *args, int index, char *s)
+int set_args_string(UDF_ARGS *args, int index, char *s)
 {
   if (args == NULL)
   {
     fprintf(stderr, "args is NULL\n");
-    return false;
+    return 0;
   }
 
   if (index <= 0 || index > args->arg_count)
   {
     fprintf(stderr, "arg_count %d and index %d not fit in\n", args->arg_count, index);
-    return false;
+    return 0;
   }
 
   args->arg_type[index - 1] = STRING_RESULT;
@@ -72,7 +82,7 @@ bool set_args_string(UDF_ARGS *args, int index, char *s)
   args->maybe_null[index - 1] = 0;
   args->lengths[index - 1] = strlen(args->args[index - 1]);
 
-  return true;
+  return 1;
 }
 
 void test_disconnect_first();
@@ -83,6 +93,7 @@ void *handle;
 char *error;
 func_serverlist serverlist = NULL;
 func_serverclean serverclean = NULL;
+func_serverrelease serverrelease = NULL;
 
 int main(int argc, char **argv)
 {
@@ -93,21 +104,29 @@ int main(int argc, char **argv)
     exit(1);
   }
 
+  serverrelease = dlsym(handle, "_release_servers");
+  if (serverrelease == NULL)
+  {
+    fprintf(stderr, "dlsym() %s\n", dlerror());
+    exit(0);
+  }
+
   serverlist = dlsym(handle, "_list_servers");
   if (serverlist == NULL)
   {
     fprintf(stderr, "dlsym() %s\n", dlerror());
-    exit;
+    exit(0);
   }
 
   serverclean = dlsym(handle, "_clean_servers");
   if (serverclean == NULL)
   {
     fprintf(stderr, "dlsym() %s\n", dlerror());
-    exit;
+    exit(0);
   }
 
   test_disconnect_first();
+  serverrelease();
 
   dlclose(handle);
   exit(0);
@@ -118,7 +137,7 @@ void test_disconnect_first()
   UDF_ARGS *args;
 
   args = alloc_args(2);
-  set_args_string(args, 1, "127.0.0.1");
+  set_args_string(args, 1, "192.0.0.1");
   set_args_string(args, 2, "tube1");
   call_udf("beanstalkd_set_server", args, STRING_RESULT);
   free_args(args);
@@ -162,7 +181,7 @@ void test_disconnect_first()
   getchar();
 }
 
-bool call_udf(char *name, UDF_ARGS *args, int ret)
+int call_udf(char *name, UDF_ARGS *args, int ret)
 {
   func_init finit = NULL;
   func_deinit fdeinit = NULL;
@@ -176,12 +195,11 @@ bool call_udf(char *name, UDF_ARGS *args, int ret)
   if (buffer == NULL)
   {
     fprintf(stderr, "malloc() failed: %d\n", errno);
-    return false;
+    return 0;
   }
   snprintf(buffer, len, "%s_init", name);
   finit = dlsym(handle, buffer);
   free(buffer);
-
   if (finit == NULL)
   {
     fprintf(stderr, "%s\n", dlerror());
@@ -193,7 +211,7 @@ bool call_udf(char *name, UDF_ARGS *args, int ret)
   if (buffer == NULL)
   {
     fprintf(stderr, "malloc() failed: %d\n", errno);
-    return false;
+    return 0;
   }
   snprintf(buffer, len, "%s_deinit", name);
   fdeinit = dlsym(handle, buffer);
@@ -212,7 +230,7 @@ bool call_udf(char *name, UDF_ARGS *args, int ret)
     if (finit(init, args, message))
     {
       printf("%s_init failed: %s\n", name, message);
-      return false;
+      return 0;
     }
   }
 
@@ -223,11 +241,14 @@ bool call_udf(char *name, UDF_ARGS *args, int ret)
     fdeinit(init);
   }
 
-  return true;
+  free(init);
+  free(message);
+
+  return 1;
 }
 
 
-bool call_udf_command(char *name, UDF_INIT *init, UDF_ARGS *args, int ret)
+int call_udf_command(char *name, UDF_INIT *init, UDF_ARGS *args, int ret)
 {
   func_s fs = NULL;
   func_d fd = NULL;
@@ -254,8 +275,8 @@ bool call_udf_command(char *name, UDF_INIT *init, UDF_ARGS *args, int ret)
     fprintf(stderr, "INT %s\n", dlerror());
   }
 
-  bool is_null = 0;
-  bool error = 0;
+  int is_null = 0;
+  int error = 0;
   switch ((int)ret)
   {
     case STRING_RESULT:
@@ -301,5 +322,5 @@ bool call_udf_command(char *name, UDF_INIT *init, UDF_ARGS *args, int ret)
     case DECIMAL_RESULT:
     break;
   }
-  return true;
+  return 1;
 }
