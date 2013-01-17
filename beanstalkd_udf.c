@@ -316,8 +316,7 @@ char *beanstalkd_set_server(UDF_INIT *initid, UDF_ARGS *args, char *result, unsi
       memcpy(server->tube, args->args[1], args->lengths[1] + 1);
     }
 
-    bs_set_timeout(0, 100000);
-    server->socket = bs_connect(server->host, 11300);
+    server->socket = bs_connect_with_timeout(server->host, 11300, 0.1);
     if (server->socket == BS_STATUS_FAIL)
     {
       _release_server(server);
